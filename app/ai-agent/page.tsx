@@ -5,13 +5,22 @@ import { DashboardHeader } from "@/components/dashboard-header"
 import { Card } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
-import { Bot, Send, User } from "lucide-react"
+import { Bot, Send, User, Paperclip, X } from "lucide-react"
+
+interface UploadedFile {
+  id?: string
+  filename: string
+  mime_type: string
+  size_bytes: number
+  content?: string // CSVファイルなどの場合、内容を直接保存
+}
 
 interface Message {
   id: string
   role: "user" | "assistant"
-  content: string
+  content: string | Array<{ type: string; text?: string; source?: { type: string; file_id: string } }>
   timestamp: Date
+  files?: UploadedFile[]
 }
 
 export default function AIAgentPage() {
@@ -25,8 +34,11 @@ export default function AIAgentPage() {
   ])
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
+  const [isUploading, setIsUploading] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -36,19 +48,125 @@ export default function AIAgentPage() {
     scrollToBottom()
   }, [messages])
 
+  const handleFileUpload = async (file: File) => {
+    setIsUploading(true)
+    try {
+      // CSVファイルの場合は内容を読み込んでテキストとして扱う
+      const isCSV = file.name.toLowerCase().endsWith('.csv') ||
+        file.type === 'text/csv' ||
+        file.type === 'application/csv'
+
+      if (isCSV) {
+        // CSVファイルの内容をテキストとして読み込む
+        const text = await file.text()
+        const uploadedFile: UploadedFile = {
+          filename: file.name,
+          mime_type: 'text/csv',
+          size_bytes: file.size,
+          content: text,
+        }
+        setUploadedFiles((prev) => [...prev, uploadedFile])
+      } else {
+        // その他のファイルはFiles APIにアップロード
+        const formData = new FormData()
+        formData.append("file", file)
+
+        const response = await fetch("/api/files", {
+          method: "POST",
+          body: formData,
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.error || "ファイルのアップロードに失敗しました")
+        }
+
+        const uploadedFile = await response.json()
+        setUploadedFiles((prev) => [...prev, uploadedFile])
+      }
+    } catch (error) {
+      console.error("File upload error:", error)
+      alert(error instanceof Error ? error.message : "ファイルのアップロードに失敗しました")
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) {
+      handleFileUpload(file)
+    }
+    // 同じファイルを再度選択できるようにリセット
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""
+    }
+  }
+
+  const removeFile = (fileIdOrFilename: string) => {
+    setUploadedFiles((prev) => prev.filter((f) => {
+      // idがある場合はidで比較、ない場合はfilenameで比較（CSVファイルなど）
+      return f.id ? f.id !== fileIdOrFilename : f.filename !== fileIdOrFilename
+    }))
+  }
+
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return
+    if ((!input.trim() && uploadedFiles.length === 0) || isLoading) return
+
+    // メッセージコンテンツの構築
+    const contentBlocks: Array<{ type: string; text?: string; source?: { type: string; file_id: string } }> = []
+
+    // テキストがある場合は追加
+    if (input.trim()) {
+      contentBlocks.push({
+        type: "text",
+        text: input.trim(),
+      })
+    }
+
+    // アップロードされたファイルを追加
+    for (const file of uploadedFiles) {
+      const mimeType = file.mime_type
+
+      // CSVファイルの場合は内容をテキストとして含める
+      if (file.content && (mimeType === "text/csv")) {
+        contentBlocks.push({
+          type: "text",
+          text: `以下はCSVファイル「${file.filename}」の内容です:\n\n${file.content}`,
+        })
+      }
+      else if (file.id && (mimeType === "application/pdf" || mimeType.startsWith("text/"))) {
+        contentBlocks.push({
+          type: "document",
+          source: {
+            type: "file",
+            file_id: file.id,
+          },
+        })
+      }
+      else if (file.id && mimeType.startsWith("image/")) {
+        contentBlocks.push({
+          type: "image",
+          source: {
+            type: "file",
+            file_id: file.id,
+          },
+        })
+      }
+    }
 
     const userMessage: Message = {
       id: Date.now().toString(),
       role: "user",
-      content: input.trim(),
+      content: contentBlocks.length > 0 ? contentBlocks : input.trim(),
       timestamp: new Date(),
+      files: [...uploadedFiles],
     }
 
     const updatedMessages = [...messages, userMessage]
     setMessages(updatedMessages)
     setInput("")
+    setUploadedFiles([])
     setIsLoading(true)
 
     try {
@@ -158,7 +276,39 @@ export default function AIAgentPage() {
                       : "bg-muted text-foreground"
                       }`}
                   >
-                    <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                    {typeof message.content === "string" ? (
+                      <p className="text-sm whitespace-pre-wrap break-words">{message.content}</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {message.content.map((block, idx) => (
+                          <div key={idx}>
+                            {block.type === "text" && (
+                              <p className="text-sm whitespace-pre-wrap break-words">{block.text}</p>
+                            )}
+                            {block.type === "document" && (
+                              <div className="text-xs opacity-80 mt-1">
+                                📄 ドキュメント: {message.files?.find(f => f.id === block.source?.file_id)?.filename || "ファイル"}
+                              </div>
+                            )}
+                            {block.type === "image" && (
+                              <div className="text-xs opacity-80 mt-1">
+                                🖼️ 画像: {message.files?.find(f => f.id === block.source?.file_id)?.filename || "ファイル"}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {message.files && message.files.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-current/20">
+                        <div className="text-xs opacity-80">
+                          添付ファイル: {message.files.map(f => {
+                            const isCSV = f.filename.toLowerCase().endsWith('.csv')
+                            return isCSV ? `📊 ${f.filename}` : f.filename
+                          }).join(", ")}
+                        </div>
+                      </div>
+                    )}
                     <p
                       className={`text-xs mt-2 ${message.role === "user"
                         ? "text-primary-foreground/70"
@@ -201,7 +351,50 @@ export default function AIAgentPage() {
 
             {/* 入力エリア */}
             <div className="border-t p-4">
+              {/* アップロードされたファイルの表示 */}
+              {uploadedFiles.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {uploadedFiles.map((file, index) => (
+                    <div
+                      key={file.id || `${file.filename}-${index}`}
+                      className="flex items-center gap-2 bg-muted px-3 py-1.5 rounded-md text-sm"
+                    >
+                      {file.filename.toLowerCase().endsWith('.csv') ? (
+                        <span className="text-xs">📊</span>
+                      ) : (
+                        <Paperclip className="h-3 w-3" />
+                      )}
+                      <span className="max-w-[200px] truncate">{file.filename}</span>
+                      <button
+                        onClick={() => removeFile(file.id || file.filename)}
+                        className="hover:opacity-70"
+                        disabled={isLoading}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="flex gap-2 items-end">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  className="hidden"
+                  onChange={handleFileSelect}
+                  accept=".pdf,.txt,.csv,.jpg,.jpeg,.png,.gif,.webp"
+                  disabled={isLoading || isUploading}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isLoading || isUploading}
+                  className="h-[60px] w-[60px] flex-shrink-0"
+                >
+                  <Paperclip className="h-4 w-4" />
+                </Button>
                 <div className="flex-1">
                   <Textarea
                     ref={textareaRef}
@@ -216,11 +409,19 @@ export default function AIAgentPage() {
                 </div>
                 <Button
                   onClick={handleSend}
-                  disabled={!input.trim() || isLoading}
+                  disabled={(!input.trim() && uploadedFiles.length === 0) || isLoading || isUploading}
                   size="lg"
                   className="h-[60px] px-6"
                 >
-                  <Send className="h-4 w-4" />
+                  {isUploading ? (
+                    <div className="flex gap-1">
+                      <div className="h-2 w-2 bg-current rounded-full animate-bounce" />
+                      <div className="h-2 w-2 bg-current rounded-full animate-bounce" style={{ animationDelay: "0.2s" }} />
+                      <div className="h-2 w-2 bg-current rounded-full animate-bounce" style={{ animationDelay: "0.4s" }} />
+                    </div>
+                  ) : (
+                    <Send className="h-4 w-4" />
+                  )}
                 </Button>
               </div>
             </div>

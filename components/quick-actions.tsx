@@ -11,22 +11,16 @@ const actions = [
     link: "/surveys/create",
   },
   {
-    icon: PlusCircle,
-    title: "イニシアティブを追加",
-    description: "新しいDEIプログラムを開始",
-    link: "/initiatives/create",
-  },
-  {
     icon: BarChart3,
     title: "レポートを生成",
     description: "分析とインサイトをエクスポート",
-    link: "/reports/create",
+    link: "/reports",
   },
   {
     icon: Target,
-    title: "目標を設定",
-    description: "新しいDEI目標を定義",
-    link: "/goals/create",
+    title: "目標を設定、確認",
+    description: "新しいDEI目標を作る",
+    link: "/goals",
   },
 ]
 

@@ -5,6 +5,8 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 })
 
+const FILES_API_BETA_HEADER = "files-api-2025-04-14"
+
 // DEIプラットフォーム用のシステムプロンプト
 const SYSTEM_PROMPT = `あなたは組織の多様性、公平性、インクルージョン（DEI）を支援するAIエージェントです。
 
@@ -58,14 +60,57 @@ export async function POST(request: NextRequest) {
 
     // メッセージをClaudeの形式に変換（システムメッセージを除く）
     const conversationMessages = messages
-      .filter((msg: { role: string; content: string }) => msg.role !== "system")
-      .map((msg: { role: string; content: string }) => {
+      .filter((msg: any) => msg.role !== "system")
+      .map((msg: any) => {
         if (msg.role === "assistant") {
           return {
             role: "assistant" as const,
-            content: msg.content,
+            content: typeof msg.content === "string" ? msg.content : msg.content,
           }
         }
+        
+        // ユーザーメッセージの処理
+        // contentが配列の場合は、file_idを含む可能性がある
+        if (Array.isArray(msg.content)) {
+          return {
+            role: "user" as const,
+            content: msg.content.map((block: any) => {
+              // documentブロック（PDF、テキスト）
+              if (block.type === "document" && block.source?.type === "file") {
+                return {
+                  type: "document",
+                  source: {
+                    type: "file",
+                    file_id: block.source.file_id,
+                  },
+                  title: block.title,
+                  context: block.context,
+                  citations: block.citations,
+                }
+              }
+              // imageブロック
+              if (block.type === "image" && block.source?.type === "file") {
+                return {
+                  type: "image",
+                  source: {
+                    type: "file",
+                    file_id: block.source.file_id,
+                  },
+                }
+              }
+              // テキストブロック
+              if (block.type === "text") {
+                return {
+                  type: "text",
+                  text: block.text,
+                }
+              }
+              return block
+            }),
+          }
+        }
+        
+        // 文字列の場合はそのまま
         return {
           role: "user" as const,
           content: msg.content,
@@ -84,12 +129,16 @@ export async function POST(request: NextRequest) {
 
     console.log("Calling Claude API with", conversationMessages.length, "messages")
 
-    // Claude APIを呼び出し
+    // Claude APIを呼び出し（Files APIサポートのためベータヘッダーを追加）
     const message = await anthropic.messages.create({
       model: "claude-haiku-4-5-20251001",
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
       messages: conversationMessages,
+    }, {
+      headers: {
+        "anthropic-beta": FILES_API_BETA_HEADER,
+      }
     })
 
     // レスポンスを取得
